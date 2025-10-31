@@ -5,11 +5,17 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
+import json
+import hashlib
 from pathlib import Path
+from typing import Optional
+
+security = HTTPBearer()
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +24,32 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Load teachers data
+def load_teachers():
+    teachers_file = os.path.join(current_dir, "teachers.json")
+    with open(teachers_file, 'r') as f:
+        return json.load(f)
+
+# Authentication helper functions
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> bool:
+    if not credentials:
+        return False
+    try:
+        token_parts = credentials.credentials.split(':', 1)
+        if len(token_parts) != 2:
+            return False
+        username, password_hash = token_parts
+        teachers_data = load_teachers()
+        for teacher in teachers_data['teachers']:
+            if teacher['username'] == username and teacher['password'] == password_hash:
+                return True
+        return False
+    except Exception:
+        return False
 
 # In-memory activity database
 activities = {
@@ -88,12 +120,28 @@ def get_activities():
     return activities
 
 
+@app.post("/auth/login")
+def login(username: str, password: str):
+    """Authenticate a teacher and return a token"""
+    password_hash = hash_password(password)
+    teachers_data = load_teachers()
+    for teacher in teachers_data['teachers']:
+        if teacher['username'] == username and teacher['password'] == password_hash:
+            token = f"{username}:{password_hash}"
+            return {"token": token, "username": username}
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, is_teacher: bool = Depends(verify_token)):
     """Sign up a student for an activity"""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Only teachers can register students
+    if not is_teacher:
+        raise HTTPException(status_code=403, detail="Only teachers can register students")
 
     # Get the specific activity
     activity = activities[activity_name]
@@ -111,11 +159,15 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, is_teacher: bool = Depends(verify_token)):
     """Unregister a student from an activity"""
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Only teachers can unregister students
+    if not is_teacher:
+        raise HTTPException(status_code=403, detail="Only teachers can unregister students")
 
     # Get the specific activity
     activity = activities[activity_name]
